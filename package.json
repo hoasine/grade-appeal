@@ -1,0 +1,7 @@
+{
+  "name": "grade-appeal",
+  "private": true,
+  "scripts": {
+    "test:contract": "python -m pytest tests/direct/test_grade_appeal.py"
+  }
+}
