@@ -68,6 +68,7 @@ No URL fetching — evidence is on-chain text only.
 | Stuck student stake | `cancel_appeal` refunds student stake before judgment |
 | Premature teacher withdrawal | `close_grade` only after appeal deadline with no open appeal |
 | Opaque dispute outcomes | Verdict, confidence, and reasoning stored on-chain |
+| Unverified final score after AI judge | Validators independently re-judge and must bind `recommended_score` to the verdict (raise > assigned; uphold/inconclusive = assigned) |
 | Off-chain evidence disappearing | Evidence is on-chain text (no URL dependency) |
 
 ## Core Contract API

@@ -274,8 +274,10 @@ Rules:
 - RAISE_GRADE if evidence clearly shows the student met higher rubric bands than awarded.
 - INCONCLUSIVE if evidence is too thin, contradictory, or does not cite rubric criteria.
 - Never lower the grade below the assigned score in this protocol.
-- recommended_score must be a number between assigned_score and max_score inclusive when RAISE_GRADE.
-- For UPHOLD_ORIGINAL or INCONCLUSIVE, recommended_score should equal the assigned score.
+- recommended_score is CONSENSUS-CRITICAL: validators must independently derive the same score.
+- If RAISE_GRADE: recommended_score MUST be strictly greater than assigned_score and <= max_score,
+  and must map to the higher rubric band your reasoning cites.
+- If UPHOLD_ORIGINAL or INCONCLUSIVE: recommended_score MUST equal assigned_score exactly.
 - Prefer small, justified raises; do not rewrite the whole assessment without evidence.
 """
         raw = gl.nondet.exec_prompt(prompt, response_format="json")
@@ -304,8 +306,12 @@ Rules:
         if verdict == "RAISE_GRADE":
             if recommended_f <= assigned_f:
                 recommended_f = min(max_f, assigned_f + 0.5)
+            # If still cannot raise (already at max), fall back to inconclusive.
+            if recommended_f <= assigned_f:
+                verdict = "INCONCLUSIVE"
+                recommended_f = assigned_f
         else:
-            # Uphold / inconclusive never change the recorded score directionally down.
+            # Uphold / inconclusive never change the recorded score.
             recommended_f = assigned_f
 
         try:
@@ -317,13 +323,95 @@ Rules:
         except Exception:
             confidence = 5
 
-        rec_text = f"{recommended_f:.4f}".rstrip("0").rstrip(".")
+        rec_text = self._format_score(recommended_f)
         return {
             "verdict": verdict,
             "recommended_score": rec_text[:32],
             "confidence": confidence,
             "reasoning": str(raw.get("reasoning", "No reasoning"))[:2000],
         }
+
+    def _format_score(self, value: float) -> str:
+        text = f"{float(value):.4f}".rstrip("0").rstrip(".")
+        return text if text else "0"
+
+    def _score_as_float(self, value) -> float:
+        return float(str(value).strip().replace(",", "."))
+
+    def _verdict_score_bound(
+        self, verdict: str, recommended_score, assigned_score: str, max_score: str
+    ) -> bool:
+        """Require recommended_score to match rubric/verdict semantics."""
+        verdict_u = str(verdict or "").upper().strip()
+        if verdict_u not in ("UPHOLD_ORIGINAL", "RAISE_GRADE", "INCONCLUSIVE"):
+            return False
+        try:
+            rec = self._score_as_float(recommended_score)
+            assigned_f = self._score_as_float(assigned_score)
+            max_f = self._score_as_float(max_score)
+        except Exception:
+            return False
+        if rec < 0 or rec > max_f + 1e-9:
+            return False
+        if verdict_u == "RAISE_GRADE":
+            return rec > assigned_f + 1e-9 and rec <= max_f + 1e-9
+        # UPHOLD / INCONCLUSIVE: final grade stays the assigned score.
+        return abs(rec - assigned_f) <= 1e-6
+
+    def _judgment_agrees(
+        self,
+        leader_data: dict,
+        validator_data: dict,
+        assigned_score: str,
+        max_score: str,
+    ) -> bool:
+        """Validators must bind verdict + recommended_score (+ approx confidence)."""
+        if not isinstance(leader_data, dict) or not isinstance(validator_data, dict):
+            return False
+        if "verdict" not in leader_data or "recommended_score" not in leader_data:
+            return False
+        if "verdict" not in validator_data or "recommended_score" not in validator_data:
+            return False
+
+        leader_verdict = str(leader_data.get("verdict", "")).upper().strip()
+        validator_verdict = str(validator_data.get("verdict", "")).upper().strip()
+        if leader_verdict != validator_verdict:
+            return False
+
+        if not self._verdict_score_bound(
+            leader_verdict, leader_data.get("recommended_score"), assigned_score, max_score
+        ):
+            return False
+        if not self._verdict_score_bound(
+            validator_verdict,
+            validator_data.get("recommended_score"),
+            assigned_score,
+            max_score,
+        ):
+            return False
+
+        try:
+            leader_rec = self._score_as_float(leader_data.get("recommended_score"))
+            validator_rec = self._score_as_float(validator_data.get("recommended_score"))
+        except Exception:
+            return False
+
+        # Bind the score that becomes final_grade (exact for uphold/inconclusive;
+        # tight band for raises so validators converge on the same outcome).
+        if leader_verdict == "RAISE_GRADE":
+            if abs(leader_rec - validator_rec) > 0.5:
+                return False
+        elif abs(leader_rec - validator_rec) > 1e-6:
+            return False
+
+        try:
+            conf_diff = abs(
+                int(leader_data.get("confidence", 5))
+                - int(validator_data.get("confidence", 5))
+            )
+        except Exception:
+            return False
+        return conf_diff <= 2
 
     def _payout_appeal(self, g: GradeRecord, a: Appeal, verdict: str) -> None:
         teacher_pot = g.stake
@@ -568,25 +656,27 @@ Rules:
             if not isinstance(leader_result, gl.vm.Return):
                 return False
             leader_data = leader_result.calldata
-            if not isinstance(leader_data, dict) or "verdict" not in leader_data:
+            if not isinstance(leader_data, dict):
                 return False
+            # Each validator independently re-runs the judge prompt, then binds
+            # verdict + recommended_score (+ approx confidence) to the leader.
             validator_data = leader_fn()
-            if leader_data.get("verdict") != validator_data.get("verdict"):
-                return False
-            try:
-                diff = abs(
-                    int(leader_data.get("confidence", 5))
-                    - int(validator_data.get("confidence", 5))
-                )
-            except Exception:
-                return False
-            return diff <= 2
+            return self._judgment_agrees(
+                leader_data, validator_data, score, max_score
+            )
 
         result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
-        verdict = str(result.get("verdict", "INCONCLUSIVE"))
+        verdict = str(result.get("verdict", "INCONCLUSIVE")).upper().strip()
         if verdict not in ("UPHOLD_ORIGINAL", "RAISE_GRADE", "INCONCLUSIVE"):
             verdict = "INCONCLUSIVE"
         recommended = str(result.get("recommended_score", g.score))[:32]
+
+        # Final safety bind before writing the student's final grade.
+        if not self._verdict_score_bound(verdict, recommended, g.score, g.max_score):
+            verdict = "INCONCLUSIVE"
+            recommended = g.score
+        elif verdict != "RAISE_GRADE":
+            recommended = g.score
 
         a.verdict = verdict
         a.recommended_score = recommended
