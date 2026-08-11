@@ -253,6 +253,60 @@ class TestAppealFlow:
                 value=STAKE,
             )
 
+    def test_student_can_cancel_open_appeal(self, contract, direct_vm, direct_bob):
+        _publish(contract, direct_bob)
+        direct_vm.sender = direct_bob
+        contract.sender = direct_bob
+        _payable(
+            contract,
+            "file_appeal",
+            0,
+            "Changed my mind",
+            EVIDENCE,
+            "9",
+            value=STAKE,
+        )
+        contract.cancel_appeal(0)
+        appeal = contract.get_appeal(0)
+        grade = contract.get_grade(0)
+        assert appeal["status"] == "CANCELLED"
+        assert appeal["paid_out"] is True
+        assert appeal["stake"] == 0
+        assert grade["status"] == "PUBLISHED"
+        assert grade["has_open_appeal"] is False
+        assert grade["appeal_count"] == 1
+        # Teacher stake remains locked.
+        assert grade["stake"] == STAKE
+        # One-shot: cannot appeal again after cancel.
+        with pytest.raises(Exception):
+            _payable(
+                contract,
+                "file_appeal",
+                0,
+                "Try again",
+                EVIDENCE,
+                "9",
+                value=STAKE,
+            )
+
+    def test_cannot_cancel_after_judge(self, contract, direct_vm, direct_bob):
+        _publish(contract, direct_bob)
+        direct_vm.sender = direct_bob
+        contract.sender = direct_bob
+        _payable(
+            contract,
+            "file_appeal",
+            0,
+            "Please raise",
+            EVIDENCE,
+            "9",
+            value=STAKE,
+        )
+        direct_vm.mock_llm(r".*", _verdict("UPHOLD_ORIGINAL", "6"))
+        contract.judge_appeal(0)
+        with pytest.raises(Exception):
+            contract.cancel_appeal(0)
+
 
 class TestCloseAndViews:
     def test_cannot_close_before_deadline(self, contract, direct_bob):

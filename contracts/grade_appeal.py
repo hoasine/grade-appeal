@@ -121,8 +121,31 @@ class GradeAppeal(gl.Contract):
             raise gl.vm.UserError("Grade not found")
         return self.grades[grade_id]
 
-    def _same_address(self, left: Address, right: Address) -> bool:
-        return left.as_hex.lower() == right.as_hex.lower()
+    def _addr_hex(self, value) -> str:
+        """Normalize Address / bytes / hex str for comparisons (Studionet may pass str)."""
+        if value is None:
+            return ""
+        if hasattr(value, "as_hex") and not isinstance(value, str):
+            return str(value.as_hex).lower()
+        if isinstance(value, (bytes, bytearray)):
+            return ("0x" + bytes(value).hex()).lower()
+        text = str(value).strip().lower()
+        if text and not text.startswith("0x"):
+            text = "0x" + text
+        return text
+
+    def _as_address(self, value) -> Address:
+        if hasattr(value, "as_hex") and not isinstance(value, str):
+            return value  # type: ignore[return-value]
+        text = str(value).strip()
+        if not text:
+            raise gl.vm.UserError("Address is required")
+        if not text.startswith("0x") and not text.startswith("0X"):
+            text = "0x" + text
+        return Address(text)
+
+    def _same_address(self, left, right) -> bool:
+        return self._addr_hex(left) == self._addr_hex(right)
 
     def _parse_score(self, value: str, field: str) -> float:
         text = str(value or "").strip().replace(",", ".")
@@ -154,8 +177,8 @@ class GradeAppeal(gl.Contract):
     def _grade_to_dict(self, g: GradeRecord) -> dict:
         return {
             "id": int(g.id),
-            "teacher": g.teacher.as_hex,
-            "student": g.student.as_hex,
+            "teacher": self._addr_hex(g.teacher),
+            "student": self._addr_hex(g.student),
             "course_code": g.course_code,
             "assignment_title": g.assignment_title,
             "score": g.score,
@@ -178,7 +201,7 @@ class GradeAppeal(gl.Contract):
         return {
             "id": int(a.id),
             "grade_id": int(a.grade_id),
-            "student": a.student.as_hex,
+            "student": self._addr_hex(a.student),
             "reason": a.reason,
             "evidence": a.evidence,
             "proposed_score": a.proposed_score,
@@ -340,7 +363,8 @@ Rules:
         stake = gl.message.value
         if int(stake) < int(self.minimum_stake):
             raise gl.vm.UserError("Stake must be >= minimum_stake")
-        if self._same_address(student, gl.message.sender_address):
+        student_addr = self._as_address(student)
+        if self._same_address(student_addr, gl.message.sender_address):
             raise gl.vm.UserError("Teacher cannot publish a grade for themselves")
         if not str(course_code).strip():
             raise gl.vm.UserError("course_code is required")
@@ -363,7 +387,7 @@ Rules:
         self.grades[grade_id] = GradeRecord(
             id=grade_id,
             teacher=gl.message.sender_address,
-            student=student,
+            student=student_addr,
             course_code=str(course_code).strip()[:40],
             assignment_title=str(assignment_title).strip()[:200],
             score=score_n,
@@ -464,6 +488,47 @@ Rules:
         if not str(response).strip():
             raise gl.vm.UserError("response is required")
         a.teacher_response = str(response).strip()[:3000]
+
+    @gl.public.write
+    def cancel_appeal(self, appeal_id: u256) -> None:
+        """Student withdraws an open appeal before judgment; refunds student stake only.
+
+        appeal_count stays so the grade remains one-shot (cannot re-appeal).
+        Grade returns to PUBLISHED so the teacher can still close after the deadline.
+        """
+        if appeal_id not in self.appeals:
+            raise gl.vm.UserError("Appeal not found")
+        a = self.appeals[appeal_id]
+        if a.status != "OPEN":
+            raise gl.vm.UserError("Appeal is not open")
+        if int(a.paid_out) == 1:
+            raise gl.vm.UserError("Appeal already paid out")
+        g = self._require_grade(a.grade_id)
+        if not self._same_address(gl.message.sender_address, a.student):
+            raise gl.vm.UserError("Only the student can cancel this appeal")
+        if int(g.has_open_appeal) != 1 or int(g.open_appeal_id) != int(appeal_id):
+            raise gl.vm.UserError("Appeal is not the open appeal for this grade")
+
+        student_pot = a.stake
+        a.status = "CANCELLED"
+        a.verdict = "CANCELLED"
+        a.judged_at = self._now_epoch()
+        a.reasoning = "Student cancelled the appeal before judgment."
+        a.recommended_score = g.score
+        if int(student_pot) > 0:
+            _Recipient(a.student).emit_transfer(value=student_pot)
+        a.stake = u256(0)
+        a.paid_out = u256(1)
+
+        g.has_open_appeal = u256(0)
+        g.open_appeal_id = u256(0)
+        # Keep one-shot: appeal_count stays > 0, so file_appeal remains blocked.
+        if int(g.closed) == 1:
+            g.status = "CLOSED"
+        elif g.status == "SETTLED":
+            g.status = "SETTLED"
+        else:
+            g.status = "PUBLISHED"
 
     @gl.public.write
     def judge_appeal(self, appeal_id: u256) -> None:
