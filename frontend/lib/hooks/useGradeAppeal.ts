@@ -76,6 +76,18 @@ export function useProtocolConfig() {
   });
 }
 
+export function useFairnessLedger() {
+  const client = useGradeAppealClient();
+  return useQuery({
+    queryKey: ["fairness-ledger", getContractAddress()],
+    queryFn: () => client!.getFairnessLedger(),
+    enabled: !!client,
+    staleTime: 15_000,
+    refetchInterval: 60_000,
+    retry: 0,
+  });
+}
+
 type ProgressInput = { onProgress?: (progress: TransactionProgress) => void };
 
 function useInvalidateGradeData() {
@@ -84,6 +96,7 @@ function useInvalidateGradeData() {
     Promise.all([
       qc.invalidateQueries({ queryKey: ["grades"] }),
       qc.invalidateQueries({ queryKey: ["grade-appeals"] }),
+      qc.invalidateQueries({ queryKey: ["fairness-ledger"] }),
     ]);
 }
 

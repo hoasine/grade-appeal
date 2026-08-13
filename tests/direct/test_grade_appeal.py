@@ -8,6 +8,7 @@ CONTRACT = "contracts/grade_appeal.py"
 SDK_VERSION = "v0.2.16"
 STAKE = 50_000_000_000_000_000  # 0.05 GEN
 APPEAL_WINDOW = 7 * 24 * 60 * 60
+TEACHER_RESPONSE_WINDOW = 3 * 24 * 60 * 60
 _DIRECT_VM = None
 
 RUBRIC = (
@@ -54,6 +55,25 @@ def _payable(contract, method: str, *args, value: int):
         _DIRECT_VM.value = previous
 
 
+def _expire_response_window(contract, appeal_id: int = 0):
+    """Simulate elapsed teacher-response window without waiting real time."""
+    contract.appeals[appeal_id].response_deadline_at = contract.appeals[appeal_id].created_at
+
+
+def _file_student_appeal(contract, direct_vm, direct_bob, grade_id: int = 0):
+    direct_vm.sender = direct_bob
+    contract.sender = direct_bob
+    _payable(
+        contract,
+        "file_appeal",
+        grade_id,
+        "Score should be 9 because complexity analysis and edge cases were present.",
+        EVIDENCE,
+        "9",
+        value=STAKE,
+    )
+
+
 def _publish(contract, student, appeal_window_seconds: int = 0):
     _payable(
         contract,
@@ -82,6 +102,7 @@ class TestPublish:
         assert grade["appeal_deadline_at"] >= grade["created_at"] + APPEAL_WINDOW
         cfg = contract.get_protocol_config()
         assert cfg["default_appeal_window"] == APPEAL_WINDOW
+        assert cfg["teacher_response_window"] == TEACHER_RESPONSE_WINDOW
 
     def test_rejects_self_grade(self, contract, direct_alice):
         with pytest.raises(Exception):
@@ -149,6 +170,8 @@ class TestAppealFlow:
         grade = contract.get_grade(0)
         assert grade["status"] == "APPEALED"
         assert grade["has_open_appeal"] is True
+        appeal = contract.get_appeal(0)
+        assert appeal["response_deadline_at"] >= appeal["created_at"] + TEACHER_RESPONSE_WINDOW
 
         direct_vm.sender = direct_alice
         contract.sender = direct_alice
@@ -170,6 +193,54 @@ class TestAppealFlow:
         assert grade["has_open_appeal"] is False
         assert grade["stake"] == 0
 
+    def test_rejects_premature_judge_before_teacher_response(
+        self, contract, direct_vm, direct_alice, direct_bob
+    ):
+        _publish(contract, direct_bob)
+        _file_student_appeal(contract, direct_vm, direct_bob)
+        appeal = contract.get_appeal(0)
+        assert appeal["teacher_response"] == ""
+        assert appeal["status"] == "OPEN"
+
+        with pytest.raises(Exception, match="Cannot judge yet"):
+            contract.judge_appeal(0)
+
+        still_open = contract.get_appeal(0)
+        grade = contract.get_grade(0)
+        assert still_open["status"] == "OPEN"
+        assert still_open["paid_out"] is False
+        assert grade["status"] == "APPEALED"
+        assert grade["has_open_appeal"] is True
+        assert grade["stake"] == STAKE
+
+        direct_vm.sender = direct_alice
+        contract.sender = direct_alice
+        contract.respond_to_appeal(0, "I reviewed the appeal and stand by the original score.")
+        direct_vm.clear_mocks()
+        direct_vm.mock_llm(r".*", _verdict("UPHOLD_ORIGINAL", "6"))
+        contract.judge_appeal(0)
+        judged = contract.get_appeal(0)
+        assert judged["status"] == "JUDGED"
+        assert judged["paid_out"] is True
+
+    def test_judge_allowed_after_response_window_expires_without_reply(
+        self, contract, direct_vm, direct_bob
+    ):
+        _publish(contract, direct_bob)
+        _file_student_appeal(contract, direct_vm, direct_bob)
+        with pytest.raises(Exception, match="Cannot judge yet"):
+            contract.judge_appeal(0)
+        _expire_response_window(contract)
+        direct_vm.clear_mocks()
+        direct_vm.mock_llm(r".*", _verdict("INCONCLUSIVE", "6"))
+        contract.judge_appeal(0)
+        appeal = contract.get_appeal(0)
+        grade = contract.get_grade(0)
+        assert appeal["teacher_response"] == ""
+        assert appeal["status"] == "JUDGED"
+        assert appeal["verdict"] == "INCONCLUSIVE"
+        assert grade["status"] == "SETTLED"
+
     def test_uphold_original(self, contract, direct_vm, direct_bob):
         _publish(contract, direct_bob)
         direct_vm.sender = direct_bob
@@ -183,6 +254,7 @@ class TestAppealFlow:
             "10",
             value=STAKE,
         )
+        _expire_response_window(contract)
         direct_vm.clear_mocks()
         direct_vm.mock_llm(r".*", _verdict("UPHOLD_ORIGINAL", "6"))
         contract.judge_appeal(0)
@@ -205,6 +277,7 @@ class TestAppealFlow:
             "8",
             value=STAKE,
         )
+        _expire_response_window(contract)
         direct_vm.clear_mocks()
         direct_vm.mock_llm(r".*", _verdict("LOWER_GRADE", "4"))
         contract.judge_appeal(0)
@@ -240,6 +313,7 @@ class TestAppealFlow:
             "9",
             value=STAKE,
         )
+        _expire_response_window(contract)
         direct_vm.mock_llm(r".*", _verdict("UPHOLD_ORIGINAL", "6"))
         contract.judge_appeal(0)
         with pytest.raises(Exception):
@@ -302,6 +376,7 @@ class TestAppealFlow:
             "9",
             value=STAKE,
         )
+        _expire_response_window(contract)
         direct_vm.mock_llm(r".*", _verdict("UPHOLD_ORIGINAL", "6"))
         contract.judge_appeal(0)
         with pytest.raises(Exception):
@@ -337,3 +412,60 @@ class TestCloseAndViews:
         assert len(by_student) == 1
         assert len(by_teacher) == 1
         assert by_teacher[0]["id"] == 0
+
+
+class TestFairnessLedger:
+    def test_ledger_starts_empty(self, contract):
+        ledger = contract.get_fairness_ledger()
+        assert ledger["uphold"] == 0
+        assert ledger["raise"] == 0
+        assert ledger["inconclusive"] == 0
+        assert ledger["cancelled"] == 0
+        assert ledger["judged"] == 0
+        assert ledger["judged_without_teacher_response"] == 0
+
+    def test_ledger_records_teacher_reply_and_silent_judgment(
+        self, contract, direct_vm, direct_alice, direct_bob
+    ):
+        _publish(contract, direct_bob)
+        _file_student_appeal(contract, direct_vm, direct_bob)
+        contract.cancel_appeal(0)
+        after_cancel = contract.get_fairness_ledger()
+        assert after_cancel["cancelled"] == 1
+        assert after_cancel["judged"] == 0
+
+        direct_vm.sender = direct_alice
+        contract.sender = direct_alice
+        _publish(contract, direct_bob)
+        _file_student_appeal(contract, direct_vm, direct_bob, 1)
+        _expire_response_window(contract, 1)
+        direct_vm.clear_mocks()
+        direct_vm.mock_llm(r".*", _verdict("INCONCLUSIVE", "6"))
+        contract.judge_appeal(1)
+        silent = contract.get_appeal(1)
+        ledger = contract.get_fairness_ledger()
+        assert silent["judged_without_teacher_response"] is True
+        assert silent["responded_at"] == 0
+        assert ledger["inconclusive"] == 1
+        assert ledger["judged"] == 1
+        assert ledger["judged_without_teacher_response"] == 1
+        assert ledger["cancelled"] == 1
+
+        direct_vm.sender = direct_alice
+        contract.sender = direct_alice
+        _publish(contract, direct_bob)
+        _file_student_appeal(contract, direct_vm, direct_bob, 2)
+        direct_vm.sender = direct_alice
+        contract.sender = direct_alice
+        contract.respond_to_appeal(2, "I stand by the original 6/10.")
+        direct_vm.clear_mocks()
+        direct_vm.mock_llm(r".*", _verdict("RAISE_GRADE", "9"))
+        contract.judge_appeal(2)
+        replied = contract.get_appeal(2)
+        ledger = contract.get_fairness_ledger()
+        assert replied["judged_without_teacher_response"] is False
+        assert replied["responded_at"] > 0
+        assert ledger["raise"] == 1
+        assert ledger["judged"] == 2
+        assert ledger["judged_without_teacher_response"] == 1
+

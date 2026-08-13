@@ -38,14 +38,15 @@ No URL fetching — evidence is on-chain text only.
 - **Transparent AI judgment:** verdict + reasoning against the locked rubric
 - **Student safety valve:** cancel before judge (refund student stake; still one-shot)
 - **No punitive downgrade:** appealing cannot make the grade worse as punishment
+- **Fairness ledger:** public on-chain counts of uphold / raise / inconclusive / cancelled, plus how often AI judged with no teacher reply
 
 ## Protocol Flow
 
 1. **Teacher publishes a grade** (`publish_grade`) with score, max score, rubric, justification, student, appeal window, and GEN stake
 2. **Student files an appeal** (`file_appeal`) once with reason, evidence, optional proposed score, and stake
-3. **Teacher may respond** (`respond_to_appeal`) before judgment
+3. **Teacher may respond** (`respond_to_appeal`) during a guaranteed response window (default **3 days** after filing)
 4. **Student may cancel** (`cancel_appeal`) before AI judgment — student stake refunded; cannot re-appeal
-5. **Anyone calls judge** (`judge_appeal`) — AI verdict + payout + final score update when raised
+5. **Anyone calls judge** (`judge_appeal`) only after a teacher response **or** an expired response window — AI verdict + payout + final score update when raised
 6. **Teacher closes after deadline** (`close_grade`) if no open appeal — recovers remaining teacher stake
 
 ## Verdicts
@@ -67,6 +68,7 @@ No URL fetching — evidence is on-chain text only.
 | Punitive retaliation for appealing | No `LOWER_GRADE` punishment path |
 | Stuck student stake | `cancel_appeal` refunds student stake before judgment |
 | Premature teacher withdrawal | `close_grade` only after appeal deadline with no open appeal |
+| Instant settlement before teacher can reply | `judge_appeal` requires a teacher response **or** an expired response window |
 | Opaque dispute outcomes | Verdict, confidence, and reasoning stored on-chain |
 | Unverified final score after AI judge | Validators independently re-judge and must bind `recommended_score` to the verdict (raise > assigned; uphold/inconclusive = assigned) |
 | Off-chain evidence disappearing | Evidence is on-chain text (no URL dependency) |
@@ -77,14 +79,15 @@ No URL fetching — evidence is on-chain text only.
 |----------|------|-------------|
 | `publish_grade` | write (payable) | Teacher posts score + locked rubric + appeal window |
 | `file_appeal` | write (payable) | Graded student challenges the score once |
-| `respond_to_appeal` | write | Teacher optional reply before judgment |
+| `respond_to_appeal` | write | Teacher reply during the response window |
 | `cancel_appeal` | write | Student withdraws before judgment (refund; still one-shot) |
-| `judge_appeal` | write | AI arbitration + payout + final score |
+| `judge_appeal` | write | AI arbitration after teacher reply or expired response window |
 | `close_grade` | write | Teacher closes after deadline if no open appeal |
 | `get_grade` / `get_all_grades` | view | Grade reads |
 | `get_appeal` / `get_grade_appeals` | view | Appeal reads |
 | `get_grades_for_student` / `get_grades_for_teacher` | view | Role filters |
 | `get_protocol_config` | view | Stake + window bounds |
+| `get_fairness_ledger` | view | Public verdict counts + silent-teacher judgments |
 
 ## Project Structure
 
@@ -125,6 +128,7 @@ Deploy `contracts/grade_appeal.py` via GenLayer Studio (`deploy/deployScript.ts`
 
 - Minimum stake: **0.01 GEN**
 - Default appeal window: **7 days** (bounds 60s – 30 days)
+- Teacher response window: **3 days** after `file_appeal` (judgment blocked until reply or expiry)
 
 ## StudioNet note
 

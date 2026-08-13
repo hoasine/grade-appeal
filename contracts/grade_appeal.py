@@ -61,6 +61,7 @@ class Appeal:
     teacher_response: str
     stake: u256
     created_at: u256
+    response_deadline_at: u256
     judged_at: u256
     verdict: str
     recommended_score: str
@@ -68,6 +69,8 @@ class Appeal:
     reasoning: str
     status: str
     paid_out: u256
+    responded_at: u256
+    judged_without_teacher_response: u256
 
 
 class GradeAppeal(gl.Contract):
@@ -80,6 +83,12 @@ class GradeAppeal(gl.Contract):
     default_appeal_window: u256
     min_appeal_window: u256
     max_appeal_window: u256
+    teacher_response_window: u256
+    stat_uphold: u256
+    stat_raise: u256
+    stat_inconclusive: u256
+    stat_cancelled: u256
+    stat_judged_without_teacher: u256
 
     def __init__(self):
         self.grade_count = u256(0)
@@ -88,6 +97,12 @@ class GradeAppeal(gl.Contract):
         self.default_appeal_window = u256(7 * 24 * 60 * 60)  # 7 days
         self.min_appeal_window = u256(60)  # 1 minute (demo-friendly floor)
         self.max_appeal_window = u256(30 * 24 * 60 * 60)  # 30 days
+        self.teacher_response_window = u256(3 * 24 * 60 * 60)  # 3 days after filing
+        self.stat_uphold = u256(0)
+        self.stat_raise = u256(0)
+        self.stat_inconclusive = u256(0)
+        self.stat_cancelled = u256(0)
+        self.stat_judged_without_teacher = u256(0)
 
     def _now_epoch(self) -> u256:
         try:
@@ -174,6 +189,37 @@ class GradeAppeal(gl.Contract):
             raise gl.vm.UserError("appeal_window_seconds above maximum")
         return u256(window)
 
+    def _teacher_has_responded(self, a: Appeal) -> bool:
+        return bool(str(a.teacher_response or "").strip())
+
+    def _response_window_expired(self, a: Appeal) -> bool:
+        return int(self._now_epoch()) >= int(a.response_deadline_at)
+
+    def _require_judge_ready(self, a: Appeal) -> None:
+        """Settlement is blocked until the teacher replies or the response window ends."""
+        if self._teacher_has_responded(a):
+            return
+        if self._response_window_expired(a):
+            return
+        raise gl.vm.UserError(
+            "Cannot judge yet: teacher has not responded and the response window is still open"
+        )
+
+    def _record_fairness(self, verdict: str, without_teacher: bool) -> None:
+        key = str(verdict or "").upper().strip()
+        if key == "RAISE_GRADE":
+            self.stat_raise = u256(int(self.stat_raise) + 1)
+        elif key == "UPHOLD_ORIGINAL":
+            self.stat_uphold = u256(int(self.stat_uphold) + 1)
+        elif key == "CANCELLED":
+            self.stat_cancelled = u256(int(self.stat_cancelled) + 1)
+        else:
+            self.stat_inconclusive = u256(int(self.stat_inconclusive) + 1)
+        if without_teacher and key != "CANCELLED":
+            self.stat_judged_without_teacher = u256(
+                int(self.stat_judged_without_teacher) + 1
+            )
+
     def _grade_to_dict(self, g: GradeRecord) -> dict:
         return {
             "id": int(g.id),
@@ -208,6 +254,7 @@ class GradeAppeal(gl.Contract):
             "teacher_response": a.teacher_response,
             "stake": int(a.stake),
             "created_at": int(a.created_at),
+            "response_deadline_at": int(a.response_deadline_at),
             "judged_at": int(a.judged_at),
             "verdict": a.verdict,
             "recommended_score": a.recommended_score,
@@ -215,6 +262,8 @@ class GradeAppeal(gl.Contract):
             "reasoning": a.reasoning,
             "status": a.status,
             "paid_out": int(a.paid_out) == 1,
+            "responded_at": int(a.responded_at),
+            "judged_without_teacher_response": int(a.judged_without_teacher_response) == 1,
         }
 
     def _judge_prompt(
@@ -541,6 +590,7 @@ Rules:
         g.open_appeal_id = appeal_id
         g.status = "APPEALED"
 
+        now = self._now_epoch()
         self.appeals[appeal_id] = Appeal(
             id=appeal_id,
             grade_id=grade_id,
@@ -550,7 +600,8 @@ Rules:
             proposed_score=proposed,
             teacher_response="",
             stake=stake,
-            created_at=self._now_epoch(),
+            created_at=now,
+            response_deadline_at=u256(int(now) + int(self.teacher_response_window)),
             judged_at=u256(0),
             verdict="",
             recommended_score="",
@@ -558,6 +609,8 @@ Rules:
             reasoning="",
             status="OPEN",
             paid_out=u256(0),
+            responded_at=u256(0),
+            judged_without_teacher_response=u256(0),
         )
         self.grade_appeal_index[self._index_key(grade_id, idx)] = appeal_id
 
@@ -576,6 +629,7 @@ Rules:
         if not str(response).strip():
             raise gl.vm.UserError("response is required")
         a.teacher_response = str(response).strip()[:3000]
+        a.responded_at = self._now_epoch()
 
     @gl.public.write
     def cancel_appeal(self, appeal_id: u256) -> None:
@@ -617,6 +671,7 @@ Rules:
             g.status = "SETTLED"
         else:
             g.status = "PUBLISHED"
+        self._record_fairness("CANCELLED", False)
 
     @gl.public.write
     def judge_appeal(self, appeal_id: u256) -> None:
@@ -626,6 +681,7 @@ Rules:
         if a.status != "OPEN":
             raise gl.vm.UserError("Appeal is not open")
         g = self._require_grade(a.grade_id)
+        self._require_judge_ready(a)
 
         course_code = g.course_code
         assignment_title = g.assignment_title
@@ -684,6 +740,9 @@ Rules:
         a.reasoning = str(result.get("reasoning", ""))[:2000]
         a.judged_at = self._now_epoch()
         a.status = "JUDGED"
+        silent_teacher = not self._teacher_has_responded(a)
+        a.judged_without_teacher_response = u256(1 if silent_teacher else 0)
+        self._record_fairness(verdict, silent_teacher)
 
         if verdict == "RAISE_GRADE":
             g.final_score = recommended
@@ -776,6 +835,23 @@ Rules:
             "default_appeal_window": int(self.default_appeal_window),
             "min_appeal_window": int(self.min_appeal_window),
             "max_appeal_window": int(self.max_appeal_window),
+            "teacher_response_window": int(self.teacher_response_window),
+        }
+
+    @gl.public.view
+    def get_fairness_ledger(self) -> dict:
+        judged = (
+            int(self.stat_uphold)
+            + int(self.stat_raise)
+            + int(self.stat_inconclusive)
+        )
+        return {
+            "uphold": int(self.stat_uphold),
+            "raise": int(self.stat_raise),
+            "inconclusive": int(self.stat_inconclusive),
+            "cancelled": int(self.stat_cancelled),
+            "judged": judged,
+            "judged_without_teacher_response": int(self.stat_judged_without_teacher),
         }
 
     @gl.public.view

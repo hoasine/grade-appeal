@@ -103,12 +103,16 @@ export function GradeCard({ grade }: { grade: GradeView }) {
 
   const canCancel =
     isConnected && isStudent && Boolean(openAppeal) && openAppeal?.status === "OPEN";
+  const teacherReplied = Boolean(openAppeal?.teacher_response?.trim());
+  const responseWindowExpired =
+    Boolean(openAppeal) && now >= (openAppeal?.response_deadline_at ?? 0) * 1000;
   const canRespond =
     isConnected &&
     isTeacher &&
     Boolean(openAppeal) &&
-    !openAppeal?.teacher_response?.trim();
-  const canJudge = isConnected && Boolean(openAppeal);
+    !teacherReplied;
+  const canJudge =
+    isConnected && Boolean(openAppeal) && (teacherReplied || responseWindowExpired);
   const canClose =
     isConnected &&
     isTeacher &&
@@ -252,6 +256,11 @@ export function GradeCard({ grade }: { grade: GradeView }) {
               {latestAppeal.reasoning ? ` — ${latestAppeal.reasoning}` : ""}
             </p>
           )}
+          {latestAppeal.judged_without_teacher_response && (
+            <p className="text-xs text-amber">
+              Settled after the teacher response window with no teacher reply on-chain.
+            </p>
+          )}
         </div>
       )}
 
@@ -388,6 +397,12 @@ export function GradeCard({ grade }: { grade: GradeView }) {
           >
             Cancel appeal
           </Button>
+        )}
+
+        {openAppeal && !canJudge && !teacherReplied && (
+          <p className="w-full text-xs text-muted-foreground">
+            Waiting for teacher response (or response window to expire) before judgment.
+          </p>
         )}
 
         {canJudge && openAppeal && (

@@ -16,7 +16,7 @@ const steps = [
   {
     icon: Timer,
     title: "Teacher may respond",
-    desc: "Optional reply before the AI jury. Deadlines protect both sides.",
+    desc: "Guaranteed reply window before AI can settle. Deadlines protect both sides.",
   },
   {
     icon: Brain,

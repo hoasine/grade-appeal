@@ -43,6 +43,7 @@ export type AppealView = {
   teacher_response: string;
   stake: number | string;
   created_at: number;
+  response_deadline_at: number;
   judged_at: number;
   verdict: Verdict;
   recommended_score: string;
@@ -50,6 +51,17 @@ export type AppealView = {
   reasoning: string;
   status: AppealStatus;
   paid_out: boolean;
+  responded_at: number;
+  judged_without_teacher_response: boolean;
+};
+
+export type FairnessLedger = {
+  uphold: number;
+  raise: number;
+  inconclusive: number;
+  cancelled: number;
+  judged: number;
+  judged_without_teacher_response: number;
 };
 
 export type ProtocolConfig = {
@@ -57,6 +69,7 @@ export type ProtocolConfig = {
   default_appeal_window: number | string;
   min_appeal_window: number | string;
   max_appeal_window: number | string;
+  teacher_response_window: number | string;
 };
 
 export type TransactionProgress = {
@@ -408,6 +421,15 @@ export class GradeAppealClient {
       args: [],
     });
     return normalizeReadResult<ProtocolConfig>(raw);
+  }
+
+  async getFairnessLedger(): Promise<FairnessLedger> {
+    const raw = await this.readClient.readContract({
+      address: this.contractAddress,
+      functionName: "get_fairness_ledger",
+      args: [],
+    });
+    return normalizeReadResult<FairnessLedger>(raw);
   }
 
   async publishGrade(

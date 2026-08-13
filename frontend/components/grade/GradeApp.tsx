@@ -13,6 +13,7 @@ import {
 import { PublishGradeForm } from "@/components/grade/PublishGradeForm";
 import { GradeCard } from "@/components/grade/GradeCard";
 import { HowItWorks } from "@/components/grade/HowItWorks";
+import { FairnessLedger } from "@/components/grade/FairnessLedger";
 import { ContractSetupBanner } from "@/components/ContractSetupBanner";
 import { RateLimitNotice } from "@/components/RateLimitNotice";
 import { useGrades, type GradeFilter } from "@/lib/hooks/useGradeAppeal";
@@ -107,6 +108,7 @@ export function GradeApp() {
             ))}
           </div>
           <HowItWorks />
+          <FairnessLedger />
         </div>
       )}
 
